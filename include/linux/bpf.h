@@ -1639,6 +1639,9 @@ int cpu_map_enqueue(struct bpf_cpu_map_entry *rcpu, struct xdp_buff *xdp,
 int cpu_map_generic_redirect(struct bpf_cpu_map_entry *rcpu,
 			     struct sk_buff *skb);
 
+int pifo_map_enqueue(struct bpf_map *map, struct xdp_buff *xdp, u32 index);
+struct xdp_frame *pifo_map_dequeue(struct bpf_map *map, u64 flags);
+
 /* Return map's numa specified by userspace */
 static inline int bpf_map_attr_numa_node(const union bpf_attr *attr)
 {

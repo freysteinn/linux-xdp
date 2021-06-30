@@ -3984,6 +3984,13 @@ int xdp_do_redirect(struct net_device *dev, struct xdp_buff *xdp,
 			err = dev_map_enqueue(fwd, xdp, dev);
 		}
 		break;
+	case BPF_MAP_TYPE_PIFO:
+		map = READ_ONCE(ri->map);
+		if (unlikely(!map))
+			err = -EINVAL;
+		else
+			err = pifo_map_enqueue(map, xdp, ri->tgt_index);
+		break;
 	case BPF_MAP_TYPE_CPUMAP:
 		err = cpu_map_enqueue(fwd, xdp, dev);
 		break;
