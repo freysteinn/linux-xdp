@@ -76,6 +76,12 @@ struct xdp_buff {
 	u32 frame_sz; /* frame size to deduce data_hard_end/reserved tailroom*/
 };
 
+struct dequeue_data {
+	struct xdp_txq_info *txq;
+	struct xdp_frame *dequeued_pkt;
+};
+
+
 static __always_inline void
 xdp_init_buff(struct xdp_buff *xdp, u32 frame_sz, struct xdp_rxq_info *rxq)
 {
