@@ -342,6 +342,7 @@ enum bpf_arg_type {
 	ARG_PTR_TO_STACK_OR_NULL,	/* pointer to stack or NULL */
 	ARG_PTR_TO_CONST_STR,	/* pointer to a null terminated read-only string */
 	ARG_PTR_TO_TIMER,	/* pointer to bpf_timer */
+	ARG_PTR_TO_QUEUED_PKT,	/* pointer to queued packet */
 	__BPF_ARG_TYPE_MAX,
 };
 
@@ -359,6 +360,7 @@ enum bpf_return_type {
 	RET_PTR_TO_MEM_OR_BTF_ID_OR_NULL, /* returns a pointer to a valid memory or a btf_id or NULL */
 	RET_PTR_TO_MEM_OR_BTF_ID,	/* returns a pointer to a valid memory or a btf_id */
 	RET_PTR_TO_BTF_ID,		/* returns a pointer to a btf_id */
+	RET_PTR_TO_QUEUED_PKT_OR_NULL,	/* returns a pointer to a queued packet */
 };
 
 /* eBPF function prototype used by verifier to allow BPF_CALLs from eBPF programs
@@ -460,6 +462,8 @@ enum bpf_reg_type {
 	PTR_TO_PERCPU_BTF_ID,	 /* reg points to a percpu kernel variable */
 	PTR_TO_FUNC,		 /* reg points to a bpf program function */
 	PTR_TO_MAP_KEY,		 /* reg points to a map element key */
+	PTR_TO_QUEUED_PKT,		 /* reg points to an enqueued packet */
+	PTR_TO_QUEUED_PKT_OR_NULL,		 /* reg points to an enqueued packet or NULL */
 	__BPF_REG_TYPE_MAX,
 };
 
