@@ -54,6 +54,7 @@
 #include <linux/net_tstamp.h>
 #include <net/net_namespace.h>
 #include <linux/u64_stats_sync.h>
+#include <net/page_pool.h>
 
 /* blackhole_netdev - a device used for dsts that are marked expired!
  * This is global device (instead of per-net-ns) since it's not needed
@@ -61,6 +62,10 @@
  */
 struct net_device *blackhole_netdev;
 EXPORT_SYMBOL(blackhole_netdev);
+
+struct loopback_priv {
+	struct page_pool *page_pool;
+};
 
 /* The higher levels take care of making this non-reentrant (it's
  * called with bh's disabled).
@@ -148,8 +153,49 @@ static int loopback_dev_init(struct net_device *dev)
 
 static void loopback_dev_free(struct net_device *dev)
 {
+	struct loopback_priv *priv = netdev_priv(dev);
+
+	if (priv->page_pool) {
+		page_pool_destroy(priv->page_pool);
+		priv->page_pool = NULL;
+	}
+
 	dev_net(dev)->loopback_dev = NULL;
 	free_percpu(dev->lstats);
+}
+
+struct page_pool *dev_loopback_get_page_pool(struct net *net)
+{
+	struct net_device *dev = net->loopback_dev;
+	struct loopback_priv *priv = netdev_priv(dev);
+
+	if (!priv->page_pool) {
+		struct page_pool_params pp_params = {
+			.order = 0,
+			.flags = 0,
+			.pool_size = 128,
+			.nid = NUMA_NO_NODE,
+			.max_len = PAGE_SIZE - sizeof(struct skb_shared_info),
+		};
+		struct netdev_rx_queue *rxq;
+		struct page_pool *pp;
+		int err;
+
+		rxq = __netif_get_rx_queue(dev, 0);
+
+		pp = page_pool_create(&pp_params);
+		if (IS_ERR(pp))
+			return pp;
+
+		err = xdp_rxq_info_reg_mem_model(&rxq->xdp_rxq, MEM_TYPE_PAGE_POOL, pp);
+		if (err) {
+			page_pool_destroy(pp);
+			return ERR_PTR(err);
+		}
+		priv->page_pool = pp;
+	}
+
+	return priv->page_pool;
 }
 
 static const struct net_device_ops loopback_ops = {
@@ -208,7 +254,7 @@ static __net_init int loopback_net_init(struct net *net)
 	int err;
 
 	err = -ENOMEM;
-	dev = alloc_netdev(0, "lo", NET_NAME_UNKNOWN, loopback_setup);
+	dev = alloc_netdev(sizeof(struct loopback_priv), "lo", NET_NAME_UNKNOWN, loopback_setup);
 	if (!dev)
 		goto out;
 
