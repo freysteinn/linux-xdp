@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright (c) 2017 Facebook
  */
+#include "linux/netdevice.h"
 #include <linux/bpf.h>
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
@@ -87,8 +88,52 @@ reset:
 	return false;
 }
 
+static void init_ctx_from_page(struct xdp_buff *new_ctx, struct page *page,
+			       struct xdp_buff *orig_ctx)
+{
+	size_t len = orig_ctx->data_end - orig_ctx->data_meta;
+	void *data = phys_to_virt(page_to_phys(page));
+	u32 headroom = XDP_PACKET_HEADROOM;
+
+	memcpy(data + headroom, orig_ctx->data_meta, len);
+	xdp_init_buff(new_ctx, PAGE_SIZE, orig_ctx->rxq);
+	xdp_prepare_buff(new_ctx, data, headroom, len, true);
+}
+
+static int bpf_test_run_xdp(struct bpf_prog *prog, struct xdp_buff *orig_ctx, struct page_pool *pp)
+{
+	struct xdp_buff *ctx, new_ctx = {};
+	struct page *page;
+	int ret, err;
+
+	if (pp) {
+		page = page_pool_alloc_pages(pp, GFP_ATOMIC | __GFP_NOWARN);
+		if (!page)
+			return -ENOMEM;
+
+		init_ctx_from_page(&new_ctx, page, orig_ctx);
+		ctx = &new_ctx;
+	} else {
+		ctx = orig_ctx;
+	}
+
+	ret = bpf_prog_run_xdp(prog, ctx);
+	if (pp) {
+		if (ret == XDP_REDIRECT) {
+			err = xdp_do_redirect(ctx->rxq->dev, ctx, prog);
+			if (!err)
+				goto done;
+			else
+				ret = err;
+		}
+		page_pool_put_page(pp, page, -1, false);
+	}
+done:
+	return ret;
+}
+
 static int bpf_test_run(struct bpf_prog *prog, void *ctx, u32 repeat,
-			u32 *retval, u32 *time, bool xdp)
+			u32 *retval, u32 *time, bool xdp, struct page_pool *pp)
 {
 	struct bpf_prog_array_item item = {.prog = prog};
 	struct bpf_run_ctx *old_ctx;
@@ -114,10 +159,15 @@ static int bpf_test_run(struct bpf_prog *prog, void *ctx, u32 repeat,
 	old_ctx = bpf_set_run_ctx(&run_ctx.run_ctx);
 	do {
 		run_ctx.prog_item = &item;
-		if (xdp)
-			*retval = bpf_prog_run_xdp(prog, ctx);
-		else
+		if (xdp) {
+			ret = bpf_test_run_xdp(prog, ctx, pp);
+			if (ret >= 0)
+				*retval = ret;
+			else
+				break;
+		} else {
 			*retval = bpf_prog_run(prog, ctx);
+		}
 	} while (bpf_test_timer_continue(&t, repeat, &ret, time));
 	bpf_reset_run_ctx(old_ctx);
 	bpf_test_timer_leave(&t);
@@ -663,7 +713,7 @@ int bpf_prog_test_run_skb(struct bpf_prog *prog, const union bpf_attr *kattr,
 	ret = convert___skb_to_skb(skb, ctx);
 	if (ret)
 		goto out;
-	ret = bpf_test_run(prog, skb, repeat, &retval, &duration, false);
+	ret = bpf_test_run(prog, skb, repeat, &retval, &duration, false, NULL);
 	if (ret)
 		goto out;
 	if (!is_l2) {
@@ -757,11 +807,13 @@ static void xdp_convert_buff_to_md(struct xdp_buff *xdp, struct xdp_md *xdp_md)
 int bpf_prog_test_run_xdp(struct bpf_prog *prog, const union bpf_attr *kattr,
 			  union bpf_attr __user *uattr)
 {
+	bool do_redirect = (kattr->test.flags & BPF_F_TEST_XDP_DO_REDIRECT);
 	u32 tailroom = SKB_DATA_ALIGN(sizeof(struct skb_shared_info));
 	u32 headroom = XDP_PACKET_HEADROOM;
 	u32 size = kattr->test.data_size_in;
 	u32 repeat = kattr->test.repeat;
 	struct netdev_rx_queue *rxqueue;
+	struct page_pool *pp = NULL;
 	struct xdp_buff xdp = {};
 	u32 retval, duration;
 	struct xdp_md *ctx;
@@ -773,6 +825,9 @@ int bpf_prog_test_run_xdp(struct bpf_prog *prog, const union bpf_attr *kattr,
 	    prog->expected_attach_type == BPF_XDP_CPUMAP)
 		return -EINVAL;
 
+	if (kattr->test.flags & ~BPF_F_TEST_XDP_DO_REDIRECT)
+		return -EINVAL;
+
 	ctx = bpf_ctx_init(kattr, sizeof(struct xdp_md));
 	if (IS_ERR(ctx))
 		return PTR_ERR(ctx);
@@ -781,7 +836,8 @@ int bpf_prog_test_run_xdp(struct bpf_prog *prog, const union bpf_attr *kattr,
 		/* There can't be user provided data before the meta data */
 		if (ctx->data_meta || ctx->data_end != size ||
 		    ctx->data > ctx->data_end ||
-		    unlikely(xdp_metalen_invalid(ctx->data)))
+		    unlikely(xdp_metalen_invalid(ctx->data)) ||
+		    (do_redirect && (ctx->ingress_ifindex || kattr->test.data_out || kattr->test.ctx_out)))
 			goto free_ctx;
 		/* Meta data is allocated from the headroom */
 		headroom -= ctx->data;
@@ -805,9 +861,17 @@ int bpf_prog_test_run_xdp(struct bpf_prog *prog, const union bpf_attr *kattr,
 	if (ret)
 		goto free_data;
 
+	if (do_redirect) {
+		pp = dev_loopback_get_page_pool(current->nsproxy->net_ns);
+		if (IS_ERR(pp)) {
+			ret = PTR_ERR(pp);
+			goto free_data;
+		}
+	}
+
 	if (repeat > 1)
 		bpf_prog_change_xdp(NULL, prog);
-	ret = bpf_test_run(prog, &xdp, repeat, &retval, &duration, true);
+	ret = bpf_test_run(prog, &xdp, repeat, &retval, &duration, true, pp);
 	/* We convert the xdp_buff back to an xdp_md before checking the return
 	 * code so the reference count of any held netdevice will be decremented
 	 * even if the test run failed.
@@ -852,7 +916,7 @@ int bpf_prog_test_run_dequeue(struct bpf_prog *prog, const union bpf_attr *kattr
 	    kattr->test.ctx_in || kattr->test.ctx_out || repeat > 1)
 		return -EINVAL;
 
-	ret = bpf_test_run(prog, &ctx, repeat, &retval, &duration, true);
+	ret = bpf_test_run(prog, &ctx, repeat, &retval, &duration, false, NULL);
 	if (ret)
 		goto out;
 
