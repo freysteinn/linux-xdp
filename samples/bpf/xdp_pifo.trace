@@ -1,4 +1,7 @@
-udp eth proto=2 dst port=8080
-udp eth proto=1 dst port=8080
-dequeue udp eth proto=1 dst port=8080
-dequeue udp eth proto=2 dst port=8080
+global bpf file=./xdp_scheduler_pifo.bpf.o
+udp dst port=8082
+udp dst port=8080
+udp dst port=8081
+dequeue udp dst port=8080
+dequeue udp dst port=8081
+dequeue udp dst port=8082
