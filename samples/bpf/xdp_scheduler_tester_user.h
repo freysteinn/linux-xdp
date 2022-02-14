@@ -8,6 +8,9 @@
 #define MAX_LINE (1 << 10)
 #define MAX_TOKEN (1 << 6)
 
+#define DEFAULT_XDP_FUNC "enqueue_prog"
+#define DEFAULT_DEQUEUE_FUNC "dequeue_prog"
+
 struct cmd_udp_state {
 	struct ipv6_udp_packet *pkt;
 	size_t pkt_size;
@@ -33,8 +36,15 @@ struct config {
 	} global;
 
 	union cmd_state state;
+
+	// BPF
+	char *xdp_func;
+	char *dequeue_func;
 	int xdp_prog_fd;
 	int dequeue_prog_fd;
+
+	int packet_cnt;
+
 	char *token;
 	char line[MAX_LINE];
 	int line_nr;
@@ -64,17 +74,21 @@ typedef struct trace_cmd {
 void setmac(struct config *cfg);
 
 char *parse_elements(char *line, trace_cmd *cmd_category, struct config *cfg);
-void run_file(FILE* trace_file, struct config *cfg);
+void run_file(FILE *trace_file, struct config *cfg);
 
-void cmd_udp_eth_proto_fn(void* proto, struct config *cfg);
-void cmd_udp_dst_port_fn(void* port, struct config *cfg);
-void cmd_udp_dst_ip_fn(void* ip, struct config *cfg);
+void cmd_g_bpf_xdp_fn(void *func, struct config *cfg);
+void cmd_g_bpf_dequeue_fn(void *func, struct config *cfg);
+void cmd_g_bpf_file_fn(void *filename, struct config *cfg);
+
+void cmd_udp_eth_proto_fn(void *proto, struct config *cfg);
+void cmd_udp_dst_port_fn(void *port, struct config *cfg);
+void cmd_udp_dst_ip_fn(void *ip, struct config *cfg);
 void cmd_udp_init_fn(void *none, struct config *cfg);
 void cmd_udp_fn(void *none, struct config *cfg);
 
-void cmd_d_udp_eth_proto_fn(void* proto, struct config *cfg);
-void cmd_d_udp_dst_port_fn(void* port, struct config *cfg);
-void cmd_d_udp_dst_ip_fn(void* ip, struct config *cfg);
+void cmd_d_udp_eth_proto_fn(void *proto, struct config *cfg);
+void cmd_d_udp_dst_port_fn(void *port, struct config *cfg);
+void cmd_d_udp_dst_ip_fn(void *ip, struct config *cfg);
 void cmd_d_udp_init_fn(void *none, struct config *cfg);
 void cmd_d_udp_fn(void *none, struct config *cfg);
 

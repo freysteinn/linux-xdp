@@ -15,7 +15,7 @@ struct {
 
 /* Simple PIFO strict priority */
 SEC("xdp")
-int xdp_pifo(struct xdp_md *xdp)
+int enqueue_prog(struct xdp_md *xdp)
 {
 	void *data = (void *)(long)xdp->data;
 	void *data_end = (void *)(long)xdp->data_end;
@@ -27,18 +27,73 @@ int xdp_pifo(struct xdp_md *xdp)
 
 	prio = bpf_ntohs(eth->h_proto);
 
+	bpf_printk("Kern XDP prio %d", prio);
 	return bpf_redirect_map(&pifo_map, prio, 0);
 }
 
 SEC("dequeue")
-int dequeue_pifo(struct dequeue_ctx *ctx)
+int dequeue_prog(struct dequeue_ctx *ctx)
 {
 	void *pkt = (void *) bpf_packet_dequeue(ctx, &pifo_map, 0);
 	if (!pkt)
 		return 0;
 	else {
+		bpf_printk("Kern DEQUEUE");
 		return bpf_packet_return(ctx, pkt);
 	}
 }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/* Weighted Fair-Queueing */
+/*
+SEC("xdp")
+int xdp_wfq(struct xdp_md *xdp)
+{
+	void *data = (void *)(long)xdp->data;
+	void *data_end = (void *)(long)xdp->data_end;
+	struct ethhdr *eth = data;
+	__u16 proto;
+	__u16 pifo;
+
+	if (eth + 1 > data_end)
+		return XDP_DROP;
+
+	proto = bpf_ntohs(eth->h_proto);
+
+	if (proto == 0)
+		pifo = proto;
+	else if (proto == 1)
+		pifo = proto;
+	else
+		pifo = 2;
+
+	bpf_printk("Kern XDP prio %d", pifo);
+	return bpf_redirect_map(&pifo_map, 0, pifo);
+}
+
+SEC("dequeue")
+int dequeue_wfq(struct dequeue_ctx *ctx)
+{
+	void *pkt = (void *) bpf_packet_dequeue(ctx, &pifo_map, 0);
+	if (!pkt)
+		return 0;
+	else {
+		bpf_printk("Kern DEQUEUE");
+		return bpf_packet_return(ctx, pkt);
+	}
+}
+*/
 
 char _license[] SEC("license") = "GPL";

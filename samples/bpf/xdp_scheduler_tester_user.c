@@ -32,8 +32,6 @@
 #include <bpf/libbpf.h>
 #include "bpf_util.h"
 
-#include "xdp_sample_user.h"
-#include "xdp_scheduler.skel.h"
 #include "xdp_scheduler_tester_user.h"
 
 
@@ -52,6 +50,20 @@ static const struct option long_options[] = {
 /*
  * Parser commands
  */
+
+/* Global commands  */
+trace_cmd cmd_global_bpf[] = {
+	{ "xdp_func",		NULL,	NULL,	cmd_g_bpf_xdp_fn,	at_string },
+	{ "dequeue_func",	NULL,	NULL,	cmd_g_bpf_dequeue_fn,	at_string },
+	{ "file",		NULL,	NULL,	cmd_g_bpf_file_fn,	at_string },
+	{}
+};
+
+trace_cmd cmd_global[] = {
+	{ "bpf",	cmd_global_bpf,	NULL,	NULL,	at_subcommand },
+	{}
+};
+
 
 /* UDP commands */
 trace_cmd cmd_udp_eth[] = {
@@ -123,9 +135,9 @@ trace_cmd cmd_dequeue[] = {
 	{}
 };
 
-
 /* Main commands */
 trace_cmd cmd_main[] = {
+	{ "global",	cmd_global,	NULL,			NULL,		at_subcommand },
 	{ "udp",	cmd_udp,	cmd_udp_init_fn,	cmd_udp_fn,	at_subcommand },
 	{ "dequeue",	cmd_dequeue,	NULL,			NULL,		at_subcommand },
 	{}
@@ -194,13 +206,76 @@ static __be16 calc_udp_cksum(const struct ipv6_udp_packet *pkt)
 }
 
 
+/* Global commands  */
+static void set_bpf_func_name(char *func, char *value, struct config *cfg)
+{
+	if (func) {
+		free(func);
+		func = NULL;
+	}
+	func = malloc(strlen(value));
+	if (!func) {
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
+		fprintf(stderr, "%s\n", strerror(errno));
+	}
+	strcpy(func, value);
+
+}
+
+void cmd_g_bpf_xdp_fn(void *parameter, struct config *cfg)
+{
+	char *func_value = parameter;
+	set_bpf_func_name(func_value, cfg->xdp_func, cfg);
+}
+
+void cmd_g_bpf_dequeue_fn(void *parameter, struct config *cfg)
+{
+	char *func_value = parameter;
+	set_bpf_func_name(func_value, cfg->dequeue_func, cfg);
+}
+
+static void set_bpf_fd(struct bpf_object *obj, char *func_name, int *prog_fd, struct config *cfg)
+{
+	struct bpf_program *prog = bpf_object__find_program_by_name(obj, func_name);
+	*prog_fd = bpf_program__fd(prog);
+	if (*prog_fd < 0 ) {
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
+		fprintf(stderr, "Failed to run bpf_program__fd: %s\n", strerror(errno));
+		exit(EXIT_FAILURE);
+	}
+}
+
+void cmd_g_bpf_file_fn(void *parameter, struct config *cfg)
+{
+	char *filename = (char *) parameter;
+	struct bpf_object *sched_bpf_obj;
+	char *xdp_func_name = cfg->xdp_func ? cfg->xdp_func : "enqueue_prog";
+	char *dequeue_func_name = cfg->dequeue_func ? cfg->dequeue_func : "dequeue_prog";
+	char bpf_filename[255];
+	strncpy(bpf_filename, filename, strnlen(filename, sizeof(bpf_filename)));
+
+	struct bpf_prog_load_attr prog_load_attr = {
+		.prog_type	= BPF_PROG_TYPE_UNSPEC,
+		.file		= bpf_filename,
+	};
+
+	if (bpf_prog_load_xattr(&prog_load_attr, &sched_bpf_obj, &cfg->xdp_prog_fd)) {
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
+		fprintf(stderr, "Failed to run bpf_prog_load_xattr\n");
+		exit(EXIT_FAILURE);
+	}
+	set_bpf_fd(sched_bpf_obj, xdp_func_name, &cfg->xdp_prog_fd, cfg);
+	set_bpf_fd(sched_bpf_obj, dequeue_func_name, &cfg->dequeue_prog_fd, cfg);
+}
+
+
 /* UDP commands */
 void cmd_udp_eth_proto_fn(void *parameter, struct config *cfg)
 {
 	int proto = *((int *) parameter);
 	struct ipv6_udp_packet *pkt = cfg->state.udp.pkt;
 	if (proto < 0 || proto > 65535) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Ethernet protocol out of bounds %d\n", proto);
 		exit(EXIT_FAILURE);
 	}
@@ -212,7 +287,7 @@ void cmd_udp_dst_port_fn(void *parameter, struct config *cfg)
 	int port = *((int *) parameter);
 	struct ipv6_udp_packet *pkt = cfg->state.udp.pkt;
 	if (port < 0 || port > 65535) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "UDP port out of bounds %d\n", port);
 		exit(EXIT_FAILURE);
 	}
@@ -223,7 +298,7 @@ void cmd_udp_dst_ip_fn(void *parameter, struct config *cfg)
 {
 	char *ip = (char *) parameter;
 	if (!inet_pton(AF_INET6, ip, &cfg->state.udp.pkt->iph.daddr)) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Failed to set dst IPv6 address to %s\n", ip);
 		exit(EXIT_FAILURE);
 	}
@@ -241,6 +316,11 @@ void cmd_udp_fn(void *none, struct config *cfg)
 {
 	int err;
 	struct ipv6_udp_packet *pkt = cfg->state.udp.pkt;
+	if (cfg->xdp_prog_fd <= 0) {
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
+		fprintf(stderr, "No XDP hook attached\n");
+		exit(EXIT_FAILURE);
+	}
 	pkt->udp.check = calc_udp_cksum(pkt);
 	struct xdp_md ctx_in = {
 		.data_end = cfg->state.udp.pkt_size,
@@ -256,13 +336,15 @@ void cmd_udp_fn(void *none, struct config *cfg)
 	ctx_in.data_end = ctx_in.data + cfg->state.udp.pkt_size;
 	err = bpf_prog_test_run_opts(cfg->xdp_prog_fd, &opts);
 	if (err) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Failed to run XDP hook\n");
 		exit(EXIT_FAILURE);
 	}
 	free(cfg->state.udp.pkt);
 	cfg->state.udp.pkt_size = 0;
+	cfg->packet_cnt++;
 }
+
 
 /* Dequeue commands */
 void cmd_d_udp_eth_proto_fn(void *parameter, struct config *cfg)
@@ -271,7 +353,7 @@ void cmd_d_udp_eth_proto_fn(void *parameter, struct config *cfg)
 	struct ipv6_udp_packet *pkt = cfg->state.udp.pkt;
 	__be16 pkt_proto = __bpf_ntohs(pkt->eth.h_proto);
 	if (pkt_proto != proto) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Expected ethernet protocol %d but found %hd\n",
 			proto, pkt_proto);
 		exit(EXIT_FAILURE);
@@ -283,7 +365,7 @@ void cmd_d_udp_dst_port_fn(void *parameter, struct config *cfg)
 	int port = *((int *) parameter);
 	struct ipv6_udp_packet *pkt = cfg->state.udp.pkt;
 	if (pkt->udp.dest != port) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Expected UDP destination port %d but found %hd\n",
 			port, pkt->udp.dest);
 		exit(EXIT_FAILURE);
@@ -297,7 +379,7 @@ void cmd_d_udp_dst_ip_fn(void *parameter, struct config *cfg)
 	char pkt_dst_ip[INET6_ADDRSTRLEN + 1];
 	struct ipv6_udp_packet *pkt = cfg->state.udp.pkt;
 	if (!inet_pton(AF_INET6, ip, (char *) &dst_ip)) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Failed to parse IPv6 address %s\n", ip);
 		exit(EXIT_FAILURE);
 	}
@@ -305,7 +387,7 @@ void cmd_d_udp_dst_ip_fn(void *parameter, struct config *cfg)
 	if (memcmp(&pkt->iph.daddr, &dst_ip, sizeof(struct in6_addr))) {
 		inet_ntop(AF_INET6, &pkt->iph.daddr, (char *) &pkt_dst_ip,
 			  sizeof(pkt_dst_ip));
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Expected IPv6 address %s but found %s\n",
 			ip, pkt_dst_ip);
 		exit(EXIT_FAILURE);
@@ -316,6 +398,11 @@ void cmd_d_udp_init_fn(void *parameter, struct config *cfg)
 {
 	int err;
 	struct ipv6_udp_packet *pkt = calloc(sizeof(*pkt), 1);
+	if (cfg->dequeue_prog_fd <= 0) {
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
+		fprintf(stderr, "No DEQUEUE hook attached\n");
+		exit(EXIT_FAILURE);
+	}
 	cfg->state.udp.pkt = pkt;
 	cfg->state.udp.pkt_size = sizeof(*pkt);
 	DECLARE_LIBBPF_OPTS(bpf_test_run_opts, opts,
@@ -326,10 +413,12 @@ void cmd_d_udp_init_fn(void *parameter, struct config *cfg)
 
 	err = bpf_prog_test_run_opts(cfg->dequeue_prog_fd, &opts);
 	if (err) {
-		fprintf(stderr, "%s:%d: ", cfg->line, cfg->line_nr);
+		fprintf(stderr, "%s:%d:%s: ", cfg->line, cfg->line_nr, cfg->token);
 		fprintf(stderr, "Failed to run DEQUEUE hook\n");
 		exit(EXIT_FAILURE);
 	}
+
+	cfg->packet_cnt--;
 
 	if (!cfg->verbose)
 		return;
@@ -356,6 +445,8 @@ char *parse_elements(char *line, trace_cmd *cmd_category, struct config *cfg)
 		cfg->token = token;
 		if (line)
 			line = NULL;
+		if (token[0] == '#')
+			return NULL;
 		cmd = cmd_category;
 		has_unidentified = true;
 		do {
@@ -381,6 +472,7 @@ char *parse_elements(char *line, trace_cmd *cmd_category, struct config *cfg)
 				if (!token)
 					return NULL;
 				cmd = cmd_category;
+				cmd--; // Reset offset for next loop
 				continue;
 			case at_integer:
 				strncat(token_format, " = %d", MAX_TOKEN - strlen(token_format));
@@ -404,6 +496,7 @@ char *parse_elements(char *line, trace_cmd *cmd_category, struct config *cfg)
 			has_unidentified = false;
 			break;
 		} while (++cmd);
+
 		if (has_unidentified)
 			return token;
 	}
@@ -417,6 +510,7 @@ void run_file(FILE *trace_file, struct config *cfg)
 	cfg->line_nr = 1;
 	while (getline(&line, &(size_t){MAX_LINE}, trace_file) != -1) {
 		strncpy(cfg->line, line, MAX_LINE - 1);
+		cfg->line[strcspn(cfg->line, "\n")] = 0;
 		token = parse_elements(line, cmd_main, cfg);
 		if (token) {
 			fprintf(stderr, "In line %d: '%s'\n", cfg->line_nr, cfg->line);
@@ -428,19 +522,55 @@ void run_file(FILE *trace_file, struct config *cfg)
 	free(line);
 }
 
+/*
+static void print_help(char *prog)
+{
+	printf("Usage: %s [OPTION]..."
+	       "Tests BPF schedulers that use the XDP and DEQUEUE BPF hooks."
+
+	       "Mandatory arguments to long options are mandatory for short options too."
+	       "  -a, --all                  do not ignore entries starting with ."
+	       "  -A, --almost-all           do not list implied . and ..", prog);
+
+}
+
+static void usage(char *argv[], const struct option *long_options,
+		  const char *doc, int mask, bool error)
+{
+	printf("Usage: %s [OPTION]..."
+	       "Tests BPF schedulers that use the XDP and DEQUEUE BPF hooks."
+
+	       "Mandatory arguments to long options are mandatory for short options too."
+	       "  -a, --all                  do not ignore entries starting with ."
+	       "  -A, --almost-all           do not list implied . and ..", prog);
+
+	printf("  -%c, --%s");
+	printf("\n%s\nOption for %s:\n", doc, argv[0]);
+	for (int i = 0; long_options[i].name != 0; i++) {
+		printf("  -");
+		printf(" --%-15s", long_options[i].name);
+		if (long_options[i].flag != NULL)
+			printf(" flag (internal value: %d)",
+			       *long_options[i].flag);
+		else
+			printf("\t short-option: -%c", long_options[i].val);
+		printf("\n");
+	}
+	printf("\n");
+}
+*/
+
 int main(int argc, char **argv)
 {
 	struct config cfg = {0};
 	cfg.global.pkt = &global_udp_pkt_v6;
-
-	struct xdp_scheduler *skel;
 
 	int opt;
 	FILE *trace_file = stdin;
 	unsigned long p;
 	struct ether_addr *a;
 
-	while ((opt = getopt_long(argc, argv, "f:i:m:a:p:vh",
+	while ((opt = getopt_long(argc, argv, "f:i:m:a:p:vb:h",
 				  long_options, NULL)) != -1) {
 		switch (opt) {
 		case 'f':
@@ -492,6 +622,9 @@ int main(int argc, char **argv)
 		case 'v':
 			cfg.verbose = 1;
 			break;
+		case 'b':
+			cmd_g_bpf_file_fn(optarg, &cfg);
+			break;
 		case 'h':
 		default:
 			//sample_usage(argv, long_options, __doc__, mask, error);
@@ -504,21 +637,12 @@ int main(int argc, char **argv)
 	//	return ret;
 	//}
 
-	skel = xdp_scheduler__open();
-	if (!skel) {
-		fprintf(stderr, "Failed to open and load BPF program skel\n");
+	run_file(trace_file, &cfg);
+
+	if (cfg.packet_cnt) {
+		fprintf(stderr, "Failed: %d packets still remain\n", cfg.packet_cnt);
 		exit(EXIT_FAILURE);
 	}
-
-	if (xdp_scheduler__load(skel) < 0) {
-		fprintf(stderr, "Failed to xdp_scheduler__load: %s\n", strerror(errno));
-		exit(EXIT_FAIL_BPF);
-	}
-
-	cfg.xdp_prog_fd = bpf_program__fd(skel->progs.xdp_pifo);
-	cfg.dequeue_prog_fd = bpf_program__fd(skel->progs.dequeue_pifo);
-
-	run_file(trace_file, &cfg);
 
 	return EXIT_SUCCESS;
 }
